@@ -66,7 +66,10 @@ def run_retrieval(config, progress_callback=None):
     filename = f"{prefix}_{unit_name}_ALL_sensors_1min_{start_clean}_to_{end_clean}.csv"
     filepath = os.path.join(output_dir, filename)
     df.to_csv(filepath)
-    _write_metadata(filepath, host, port, database, unit_name, start_date, end_date, successful, failed, prefix)
+    _write_metadata(
+        filepath, host, port, database, unit_name, start_date, end_date,
+        successful, failed, prefix, start_time, end_time, total_points=len(df)
+    )
     summary = {"name": unit_name, "successful": len(successful), "failed": len(failed), "total_points": len(df)}
     return filepath, summary
 
@@ -124,14 +127,29 @@ def _auto_detect(host, port, database, unit_name):
         return {}
 
 
-def _write_metadata(filepath, host, port, db, unit, start, end, ok, fail, prefix):
+def _write_metadata(filepath, host, port, db, unit, start, end, ok, fail, prefix, start_time="00:00:00", end_time="23:59:59", total_points=None):
     try:
         p = filepath.replace(".csv", "_metadata.txt")
+        if total_points is None:
+            try:
+                df = pd.read_csv(filepath, index_col=0)
+                total_points = len(df)
+            except Exception:
+                total_points = 0
         with open(p, "w") as f:
-            f.write(f"{prefix} {unit} Universal Export\n")
+            f.write(f"{prefix} {unit} Universal Auto-Detection Export\n")
             f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write(f"Database: {host}:{port}/{db}\n")
-            f.write(f"Period: {start} to {end}\n")
-            f.write(f"OK: {len(ok)}, Failed: {len(fail)}\n")
+            f.write(f"Unit: {unit}\n")
+            f.write(f"Time Period: {start} {start_time} to {end} {end_time}\n")
+            f.write(f"Resolution: 1 minute\n")
+            f.write(f"Database: {host}:{port}/{db}\n\n")
+            f.write(f"Successful Sensors ({len(ok)}):\n")
+            for s in ok:
+                f.write(f"  - {s}\n")
+            if fail:
+                f.write(f"\nFailed Sensors ({len(fail)}):\n")
+                for s in fail:
+                    f.write(f"  - {s}\n")
+            f.write(f"\nTotal Data Points: {total_points:,}\n")
     except Exception:
         pass
