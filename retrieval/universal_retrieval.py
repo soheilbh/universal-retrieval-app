@@ -43,18 +43,29 @@ def run_retrieval(config, progress_callback=None):
     all_data = {}
     successful = []
     failed = []
+    sensor_mapping = {}
+    failed_mapping = {}
     total = len(sensors_and_fields)
 
+    FALLBACK_FIELDS = ("value_i", "value_b", "value_f", "value")
     for i, (col_name, unit, field) in enumerate(sensors_and_fields, 1):
         data = _query(host, port, database, unit_name, unit, field, start_str, end_str)
-        if data is None and field != "value":
-            data = _query(host, port, database, unit_name, unit, "value", start_str, end_str)
+        if data is None:
+            for alt in FALLBACK_FIELDS:
+                if alt == field:
+                    continue
+                data = _query(host, port, database, unit_name, unit, alt, start_str, end_str)
+                if data is not None:
+                    field = alt
+                    break
         if data is not None:
             all_data[col_name] = data
             successful.append(col_name)
+            sensor_mapping[col_name] = (unit, field)
             cb(i, total, col_name, f"OK ({data.notna().sum():,} values)")
         else:
             failed.append(col_name)
+            failed_mapping[col_name] = (unit, field)
             cb(i, total, col_name, "NO DATA")
 
     if not all_data:
@@ -68,7 +79,8 @@ def run_retrieval(config, progress_callback=None):
     df.to_csv(filepath)
     _write_metadata(
         filepath, host, port, database, unit_name, start_date, end_date,
-        successful, failed, prefix, start_time, end_time, total_points=len(df)
+        successful, failed, prefix, start_time, end_time,
+        df=df, sensor_mapping=sensor_mapping, failed_mapping=failed_mapping
     )
     summary = {"name": unit_name, "successful": len(successful), "failed": len(failed), "total_points": len(df)}
     return filepath, summary
@@ -94,8 +106,8 @@ def _query(host, port, database, measurement, sensor_name, field, start_str, end
         return None
 
 
-def _get_field_keys(host, port, database, measurement):
-    """Get float field keys for a measurement (for named-field schema like N-F-430214-21-07905)."""
+def _get_all_field_keys(host, port, database, measurement):
+    """Get ALL field keys for a measurement (float, integer, boolean, any type)."""
     try:
         url = f"http://{host}:{port}/query"
         q = f'SHOW FIELD KEYS FROM "{measurement}"'
@@ -106,53 +118,48 @@ def _get_field_keys(host, port, database, measurement):
         if not data.get("results") or not data["results"][0].get("series"):
             return []
         rows = data["results"][0]["series"][0].get("values", [])
-        return [row[0] for row in rows if len(row) > 1 and row[1] == "float"]
+        return [row[0] for row in rows if len(row) >= 1]
     except Exception:
         return []
 
 
-def _get_fields_for_unit(host, port, database, measurement, unit, float_fields):
-    """Discover which float fields have data for a given unit (e.g. WaterContentInformation).
-    Returns list of field names that have at least one non-null value in a sample."""
+def _get_fields_with_data_for_unit(host, port, database, measurement, unit, all_fields):
+    """For a given unit, discover which fields have data. Uses SELECT * and checks for non-null.
+    Returns list of (field_name,) that have at least one non-null value."""
     try:
         url = f"http://{host}:{port}/query"
-        # Use SELECT * to avoid long field lists (works when listing many fields fails)
         q = f'SELECT * FROM "{measurement}" WHERE unit = \'{unit}\' LIMIT 200'
         r = requests.get(url, params={"db": database, "q": q}, timeout=60)
         if r.status_code != 200:
-            return _probe_fields_fallback(host, port, database, measurement, unit, float_fields)
+            return _probe_each_field(host, port, database, measurement, unit, all_fields)
         data = r.json()
         if not data.get("results") or not data["results"][0].get("series"):
-            return _probe_fields_fallback(host, port, database, measurement, unit, float_fields)
+            return _probe_each_field(host, port, database, measurement, unit, all_fields)
         s = data["results"][0]["series"][0]
         cols = s.get("columns", [])
         vals = s.get("values", [])
         if not vals:
-            return _probe_fields_fallback(host, port, database, measurement, unit, float_fields)
+            return _probe_each_field(host, port, database, measurement, unit, all_fields)
         out = []
         for c in cols:
-            if c == "time" or c not in float_fields:
+            if c in ("time", "unit") or c not in all_fields:
                 continue
             idx = cols.index(c)
             for row in vals:
                 if idx < len(row) and row[idx] is not None:
-                    try:
-                        float(row[idx])
-                        out.append(c)
-                        break
-                    except (TypeError, ValueError):
-                        pass
-        return out if out else _probe_fields_fallback(host, port, database, measurement, unit, float_fields)
+                    out.append(c)
+                    break
+        return out if out else _probe_each_field(host, port, database, measurement, unit, all_fields)
     except Exception:
-        return _probe_fields_fallback(host, port, database, measurement, unit, float_fields)
+        return _probe_each_field(host, port, database, measurement, unit, all_fields)
 
 
-def _probe_fields_fallback(host, port, database, measurement, unit, float_fields):
-    """Fallback: probe each float field with a quick query to see which have data."""
+def _probe_each_field(host, port, database, measurement, unit, fields):
+    """Fallback: probe each field with a quick query to see which have data."""
     out = []
     try:
         url = f"http://{host}:{port}/query"
-        for f in float_fields:
+        for f in fields:
             q = f'SELECT "{f}" FROM "{measurement}" WHERE unit = \'{unit}\' LIMIT 1'
             r = requests.get(url, params={"db": database, "q": q}, timeout=30)
             if r.status_code != 200:
@@ -168,7 +175,8 @@ def _probe_fields_fallback(host, port, database, measurement, unit, float_fields
 
 
 def _auto_detect(host, port, database, unit_name):
-    """Returns list of (col_name, unit, field) for each sensor/column to retrieve."""
+    """Returns list of (col_name, unit, field) for each sensor/column to retrieve.
+    Universal: for every unit, discover which fields have data, then retrieve each."""
     try:
         url = f"http://{host}:{port}/query"
         q = f'SHOW TAG VALUES FROM "{unit_name}" WITH KEY = "unit"'
@@ -178,50 +186,32 @@ def _auto_detect(host, port, database, unit_name):
         data = r.json()
         if not data.get("results") or not data["results"][0].get("series"):
             return []
-        sensors = [row[1] for row in data["results"][0]["series"][0]["values"]]
+        units = [row[1] for row in data["results"][0]["series"][0]["values"]]
+        all_fields = _get_all_field_keys(host, port, database, unit_name)
+        if not all_fields:
+            all_fields = ["value_f", "value_b", "value_i"]
         out = []
-        FRM_F = {"s_code", "s_raw", "s_runtime_sec"}
-        TSP_F = {"hours_run", "current_percent"}
-        FRM_SI = lambda n: any(x in n.lower() for x in ["pressure", "difference", "low", "input"])
-        BOOL_PATTERNS = ("_run", "_manual", "alarm", "special_flags", "type", "running", "fault",
-                        "emergency_stop_ok", "protection_switch_ok", "Rotation_detection", "start_")
-        field_keys = _get_field_keys(host, port, database, unit_name)
-        for s in sensors:
-            if s in FRM_F or s in TSP_F:
-                out.append((s, s, "value_f"))
-            elif s.startswith("si_") and FRM_SI(s):
-                out.append((s, s, "value_f"))
-            elif (s.startswith("s_") or s.startswith("si_") or s.endswith("_run") or s.endswith("_manual") or
-                  s in ("alarm", "special_flags", "type", "running", "fault", "emergency_stop_ok",
-                        "protection_switch_ok", "Rotation_detection") or s.startswith("start_")):
-                out.append((s, s, "value_b"))
-            elif s.endswith("Information") and field_keys:
-                # Named-field schema: discover ALL float fields with data per unit (e.g. WaterContentInformation has WaterContent_percent + Omega_percent)
-                populated = _get_fields_for_unit(host, port, database, unit_name, s, field_keys)
-                if populated:
-                    for f in populated:
-                        out.append((f, s, f))
-                else:
-                    # Fallback: prefix match
-                    prefix = s.replace("Information", "")
-                    match = next((f for f in field_keys if f.startswith(prefix) and f != s), None)
-                    out.append((s, s, match if match else "value_f"))
-            else:
-                out.append((s, s, "value_f"))
+        for unit in units:
+            populated = _get_fields_with_data_for_unit(host, port, database, unit_name, unit, all_fields)
+            for field in populated:
+                col_name = field if field not in ("value_f", "value_b", "value_i") else unit
+                out.append((col_name, unit, field))
         return out
     except Exception:
         return []
 
 
-def _write_metadata(filepath, host, port, db, unit, start, end, ok, fail, prefix, start_time="00:00:00", end_time="23:59:59", total_points=None):
+def _write_metadata(filepath, host, port, db, unit, start, end, ok, fail, prefix, start_time="00:00:00", end_time="23:59:59", df=None, sensor_mapping=None, failed_mapping=None):
     try:
         p = filepath.replace(".csv", "_metadata.txt")
-        if total_points is None:
+        if df is None:
             try:
                 df = pd.read_csv(filepath, index_col=0)
-                total_points = len(df)
             except Exception:
-                total_points = 0
+                df = pd.DataFrame()
+        total_points = len(df)
+        sensor_mapping = sensor_mapping or {}
+        failed_mapping = failed_mapping or {}
         with open(p, "w") as f:
             f.write(f"{prefix} {unit} Universal Auto-Detection Export\n")
             f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
@@ -233,9 +223,33 @@ def _write_metadata(filepath, host, port, db, unit, start, end, ok, fail, prefix
             for s in ok:
                 f.write(f"  - {s}\n")
             if fail:
-                f.write(f"\nFailed Sensors ({len(fail)}):\n")
+                f.write(f"\nFailed Sensors ({len(fail)}) - no data in time range:\n")
                 for s in fail:
-                    f.write(f"  - {s}\n")
+                    ut, fi = failed_mapping.get(s, ("?", "?"))
+                    f.write(f"  - {s} <- unit={ut}, field={fi}\n")
             f.write(f"\nTotal Data Points: {total_points:,}\n")
+            if sensor_mapping:
+                f.write(f"\nField Mapping (column -> unit tag, InfluxDB field):\n")
+                for col in ok:
+                    ut, fi = sensor_mapping.get(col, ("?", "?"))
+                    f.write(f"  {col} <- unit={ut}, field={fi}\n")
+            if df is not None and not df.empty and sensor_mapping:
+                f.write(f"\nPer-column stats:\n")
+                for col in ok:
+                    if col not in df.columns:
+                        continue
+                    ser = df[col]
+                    nn = ser.notna().sum()
+                    try:
+                        num = pd.to_numeric(ser, errors="coerce")
+                        valid = num.dropna()
+                        mn = valid.min() if len(valid) else None
+                        mx = valid.max() if len(valid) else None
+                        stats = f"non-null={nn:,}"
+                        if mn is not None and mx is not None:
+                            stats += f", min={mn:.4g}, max={mx:.4g}"
+                        f.write(f"  {col}: {stats}\n")
+                    except Exception:
+                        f.write(f"  {col}: non-null={nn:,}\n")
     except Exception:
         pass
