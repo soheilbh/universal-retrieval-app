@@ -27,10 +27,10 @@ PRESETS = {
     },
     "Teesside": {
         "host": os.getenv("INFLUXDB_HOST", "localhost"),
-        "port": "9053",
+        "port": "8086",
         "database": "teesside_db",
         "prefix": "TSP",
-        "units": "BD01, CB20B",
+        "units": "BD01, CB20B, N-F-430214-21-07905",
         "start_date": "2025-04-04",
     },
     "Custom": None,
@@ -52,7 +52,7 @@ with st.form("config"):
         host = st.text_input("InfluxDB Host", value=p["host"] if p else DEFAULT_HOST, help="e.g. localhost or 172.17.2.3")
         database = st.text_input("Database", value=p["database"] if p else "farmsum_db", help="farmsum_db, teesside_db, farmsum_time_based, etc.")
     with col2:
-        port = st.text_input("Port", value=p["port"] if p else DEFAULT_PORT, help="8086 for Farmsum, 9053 for Teesside")
+        port = st.text_input("Port", value=p["port"] if p else DEFAULT_PORT, help="8086 default for Farmsum and Teesside")
         prefix = st.text_input("Prefix", value=p["prefix"] if p else "FRM", help="FRM, TSP, or custom for future DBs")
 
     st.subheader("Time range")
@@ -67,7 +67,7 @@ with st.form("config"):
     units_input = st.text_input(
         "Unit names (comma-separated)",
         value=p["units"] if p else "BD361-0, H356-0, BD361-1",
-        help="e.g. BD361-0, BD01, CB20B, energy_data",
+        help="e.g. BD361-0, BD01, CB20B, N-F-430214-21-07905, energy_data",
     )
     units = [u.strip() for u in units_input.split(",") if u.strip()]
 

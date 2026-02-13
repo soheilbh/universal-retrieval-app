@@ -1,0 +1,4 @@
+# Local runs: Streamlit on port 8052 (Docker uses same)
+[server]
+port = 8052
+address = "localhost"

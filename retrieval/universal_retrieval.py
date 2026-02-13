@@ -45,17 +45,17 @@ def run_retrieval(config, progress_callback=None):
     failed = []
     total = len(sensors_and_fields)
 
-    for i, (sensor_name, field) in enumerate(sensors_and_fields.items(), 1):
-        data = _query(host, port, database, unit_name, sensor_name, field, start_str, end_str)
+    for i, (col_name, unit, field) in enumerate(sensors_and_fields, 1):
+        data = _query(host, port, database, unit_name, unit, field, start_str, end_str)
         if data is None and field != "value":
-            data = _query(host, port, database, unit_name, sensor_name, "value", start_str, end_str)
+            data = _query(host, port, database, unit_name, unit, "value", start_str, end_str)
         if data is not None:
-            all_data[sensor_name] = data
-            successful.append(sensor_name)
-            cb(i, total, sensor_name, f"OK ({data.notna().sum():,} values)")
+            all_data[col_name] = data
+            successful.append(col_name)
+            cb(i, total, col_name, f"OK ({data.notna().sum():,} values)")
         else:
-            failed.append(sensor_name)
-            cb(i, total, sensor_name, "NO DATA")
+            failed.append(col_name)
+            cb(i, total, col_name, "NO DATA")
 
     if not all_data:
         return None, {"name": unit_name, "successful": 0, "failed": len(failed), "total_points": 0}
@@ -94,37 +94,123 @@ def _query(host, port, database, measurement, sensor_name, field, start_str, end
         return None
 
 
+def _get_field_keys(host, port, database, measurement):
+    """Get float field keys for a measurement (for named-field schema like N-F-430214-21-07905)."""
+    try:
+        url = f"http://{host}:{port}/query"
+        q = f'SHOW FIELD KEYS FROM "{measurement}"'
+        r = requests.get(url, params={"db": database, "q": q}, timeout=60)
+        if r.status_code != 200:
+            return []
+        data = r.json()
+        if not data.get("results") or not data["results"][0].get("series"):
+            return []
+        rows = data["results"][0]["series"][0].get("values", [])
+        return [row[0] for row in rows if len(row) > 1 and row[1] == "float"]
+    except Exception:
+        return []
+
+
+def _get_fields_for_unit(host, port, database, measurement, unit, float_fields):
+    """Discover which float fields have data for a given unit (e.g. WaterContentInformation).
+    Returns list of field names that have at least one non-null value in a sample."""
+    try:
+        url = f"http://{host}:{port}/query"
+        # Use SELECT * to avoid long field lists (works when listing many fields fails)
+        q = f'SELECT * FROM "{measurement}" WHERE unit = \'{unit}\' LIMIT 200'
+        r = requests.get(url, params={"db": database, "q": q}, timeout=60)
+        if r.status_code != 200:
+            return _probe_fields_fallback(host, port, database, measurement, unit, float_fields)
+        data = r.json()
+        if not data.get("results") or not data["results"][0].get("series"):
+            return _probe_fields_fallback(host, port, database, measurement, unit, float_fields)
+        s = data["results"][0]["series"][0]
+        cols = s.get("columns", [])
+        vals = s.get("values", [])
+        if not vals:
+            return _probe_fields_fallback(host, port, database, measurement, unit, float_fields)
+        out = []
+        for c in cols:
+            if c == "time" or c not in float_fields:
+                continue
+            idx = cols.index(c)
+            for row in vals:
+                if idx < len(row) and row[idx] is not None:
+                    try:
+                        float(row[idx])
+                        out.append(c)
+                        break
+                    except (TypeError, ValueError):
+                        pass
+        return out if out else _probe_fields_fallback(host, port, database, measurement, unit, float_fields)
+    except Exception:
+        return _probe_fields_fallback(host, port, database, measurement, unit, float_fields)
+
+
+def _probe_fields_fallback(host, port, database, measurement, unit, float_fields):
+    """Fallback: probe each float field with a quick query to see which have data."""
+    out = []
+    try:
+        url = f"http://{host}:{port}/query"
+        for f in float_fields:
+            q = f'SELECT "{f}" FROM "{measurement}" WHERE unit = \'{unit}\' LIMIT 1'
+            r = requests.get(url, params={"db": database, "q": q}, timeout=30)
+            if r.status_code != 200:
+                continue
+            data = r.json()
+            if data.get("results") and data["results"][0].get("series"):
+                vals = data["results"][0]["series"][0].get("values", [])
+                if vals and len(vals[0]) > 1 and vals[0][1] is not None:
+                    out.append(f)
+    except Exception:
+        pass
+    return out
+
+
 def _auto_detect(host, port, database, unit_name):
+    """Returns list of (col_name, unit, field) for each sensor/column to retrieve."""
     try:
         url = f"http://{host}:{port}/query"
         q = f'SHOW TAG VALUES FROM "{unit_name}" WITH KEY = "unit"'
         r = requests.get(url, params={"db": database, "q": q}, timeout=60)
         if r.status_code != 200:
-            return {}
+            return []
         data = r.json()
         if not data.get("results") or not data["results"][0].get("series"):
-            return {}
+            return []
         sensors = [row[1] for row in data["results"][0]["series"][0]["values"]]
-        out = {}
+        out = []
         FRM_F = {"s_code", "s_raw", "s_runtime_sec"}
         TSP_F = {"hours_run", "current_percent"}
         FRM_SI = lambda n: any(x in n.lower() for x in ["pressure", "difference", "low", "input"])
         BOOL_PATTERNS = ("_run", "_manual", "alarm", "special_flags", "type", "running", "fault",
                         "emergency_stop_ok", "protection_switch_ok", "Rotation_detection", "start_")
+        field_keys = _get_field_keys(host, port, database, unit_name)
         for s in sensors:
             if s in FRM_F or s in TSP_F:
-                out[s] = "value_f"
+                out.append((s, s, "value_f"))
             elif s.startswith("si_") and FRM_SI(s):
-                out[s] = "value_f"
+                out.append((s, s, "value_f"))
             elif (s.startswith("s_") or s.startswith("si_") or s.endswith("_run") or s.endswith("_manual") or
                   s in ("alarm", "special_flags", "type", "running", "fault", "emergency_stop_ok",
                         "protection_switch_ok", "Rotation_detection") or s.startswith("start_")):
-                out[s] = "value_b"
+                out.append((s, s, "value_b"))
+            elif s.endswith("Information") and field_keys:
+                # Named-field schema: discover ALL float fields with data per unit (e.g. WaterContentInformation has WaterContent_percent + Omega_percent)
+                populated = _get_fields_for_unit(host, port, database, unit_name, s, field_keys)
+                if populated:
+                    for f in populated:
+                        out.append((f, s, f))
+                else:
+                    # Fallback: prefix match
+                    prefix = s.replace("Information", "")
+                    match = next((f for f in field_keys if f.startswith(prefix) and f != s), None)
+                    out.append((s, s, match if match else "value_f"))
             else:
-                out[s] = "value_f"
+                out.append((s, s, "value_f"))
         return out
     except Exception:
-        return {}
+        return []
 
 
 def _write_metadata(filepath, host, port, db, unit, start, end, ok, fail, prefix, start_time="00:00:00", end_time="23:59:59", total_points=None):

@@ -7,7 +7,7 @@ services:
     container_name: universal-retrieval
     restart: unless-stopped
     ports:
-      - "8502:8502"
+      - "8052:8052"
     volumes:
       - retrieval_outputs:/app/outputs
 
