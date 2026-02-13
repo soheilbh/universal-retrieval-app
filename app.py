@@ -2,6 +2,7 @@
 Universal Data Retrieval App
 Simple UI for Teesside, Farmsum, or any InfluxDB.
 """
+APP_VERSION = "1.1.0"  # Bump when deploying - check sidebar to verify build
 
 import os
 import tarfile
@@ -39,6 +40,7 @@ YESTERDAY = datetime.now().date() - timedelta(days=1)
 
 st.set_page_config(page_title="Data Retrieval", layout="centered")
 st.title("Universal Data Retrieval")
+st.caption(f"v{APP_VERSION}")
 
 # Preset selector at top
 preset = st.radio("Preset", list(PRESETS.keys()), horizontal=True)
