@@ -78,7 +78,7 @@ def run_retrieval(config, progress_callback=None):
     start_time = config.get("start_time", "00:00:00")
     end_time = config.get("end_time", "23:59:59")
     resolution = config.get("resolution", "1m")
-    use_chunked = config.get("use_chunked", True)
+    use_chunked = config.get("use_chunked", False)
 
     os.makedirs(output_dir, exist_ok=True)
 

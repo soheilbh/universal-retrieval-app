@@ -77,7 +77,7 @@ with st.form("config"):
 
     use_chunked = st.checkbox(
         "Use chunked retrieval",
-        value=True,
+        value=False,
         help="Split 1s/5s/15s queries into time chunks to avoid timeouts. Uncheck for one query per sensor (can be slower or timeout on large 1s ranges). 1m and coarser always use a single query.",
         key="use_chunked",
     )
