@@ -2,7 +2,7 @@
 Universal Data Retrieval App
 Simple UI for Teesside, Farmsum, or any InfluxDB.
 """
-APP_VERSION = "1.1.0"  # Bump when deploying - check sidebar to verify build
+APP_VERSION = "1.2.0"  # Bump when deploying - check sidebar to verify build
 
 import os
 import tarfile
