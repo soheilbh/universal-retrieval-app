@@ -8,10 +8,23 @@ import requests
 import pandas as pd
 from datetime import datetime
 
+def _resolution_to_label(resolution):
+    """Map InfluxDB interval (e.g. 1m, 1s) to filename-safe label (e.g. 1min, 1sec)."""
+    m = {"1s": "1sec", "5s": "5sec", "15s": "15sec", "1m": "1min", "5m": "5min", "15m": "15min", "1h": "1hr"}
+    return m.get(resolution, resolution.replace("m", "min").replace("s", "sec").replace("h", "hr"))
+
+
+def _resolution_to_description(resolution):
+    """Map InfluxDB interval to human-readable string for metadata."""
+    m = {"1s": "1 second", "5s": "5 seconds", "15s": "15 seconds", "1m": "1 minute",
+         "5m": "5 minutes", "15m": "15 minutes", "1h": "1 hour"}
+    return m.get(resolution, resolution)
+
+
 def run_retrieval(config, progress_callback=None):
     """
     Run sensor retrieval for one unit.
-    config: dict with host, port, database, unit_name, prefix, start_date, end_date, output_dir
+    config: dict with host, port, database, unit_name, prefix, start_date, end_date, output_dir, resolution
     progress_callback: optional fn(current, total, sensor_name, status)
     Returns: path to saved CSV or None
     """
@@ -25,6 +38,7 @@ def run_retrieval(config, progress_callback=None):
     output_dir = config.get("output_dir", "./outputs")
     start_time = config.get("start_time", "00:00:00")
     end_time = config.get("end_time", "23:59:59")
+    resolution = config.get("resolution", "1m")
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -49,12 +63,12 @@ def run_retrieval(config, progress_callback=None):
 
     FALLBACK_FIELDS = ("value_i", "value_b", "value_f", "value")
     for i, (col_name, unit, field) in enumerate(sensors_and_fields, 1):
-        data = _query(host, port, database, unit_name, unit, field, start_str, end_str)
+        data = _query(host, port, database, unit_name, unit, field, start_str, end_str, resolution)
         if data is None:
             for alt in FALLBACK_FIELDS:
                 if alt == field:
                     continue
-                data = _query(host, port, database, unit_name, unit, alt, start_str, end_str)
+                data = _query(host, port, database, unit_name, unit, alt, start_str, end_str, resolution)
                 if data is not None:
                     field = alt
                     break
@@ -74,23 +88,25 @@ def run_retrieval(config, progress_callback=None):
     df = pd.DataFrame(all_data).sort_index()
     start_clean = start_date.replace("-", "")
     end_clean = end_date.replace("-", "")
-    filename = f"{prefix}_{unit_name}_ALL_sensors_1min_{start_clean}_to_{end_clean}.csv"
+    res_label = _resolution_to_label(resolution)
+    filename = f"{prefix}_{unit_name}_ALL_sensors_{res_label}_{start_clean}_to_{end_clean}.csv"
     filepath = os.path.join(output_dir, filename)
     df.to_csv(filepath)
     _write_metadata(
         filepath, host, port, database, unit_name, start_date, end_date,
         successful, failed, prefix, start_time, end_time,
-        df=df, sensor_mapping=sensor_mapping, failed_mapping=failed_mapping
+        df=df, sensor_mapping=sensor_mapping, failed_mapping=failed_mapping,
+        resolution=resolution
     )
     summary = {"name": unit_name, "successful": len(successful), "failed": len(failed), "total_points": len(df)}
     return filepath, summary
 
 
-def _query(host, port, database, measurement, sensor_name, field, start_str, end_str):
+def _query(host, port, database, measurement, sensor_name, field, start_str, end_str, interval="1m"):
     try:
         url = f"http://{host}:{port}/query"
         query = f'''SELECT LAST({field}) as value FROM "{measurement}" WHERE unit = '{sensor_name}' 
-        AND time >= '{start_str}' AND time <= '{end_str}' GROUP BY time(1m) FILL(previous)'''
+        AND time >= '{start_str}' AND time <= '{end_str}' GROUP BY time({interval}) FILL(previous)'''
         r = requests.get(url, params={"db": database, "q": query}, timeout=600)
         if r.status_code != 200:
             return None
@@ -201,7 +217,7 @@ def _auto_detect(host, port, database, unit_name):
         return []
 
 
-def _write_metadata(filepath, host, port, db, unit, start, end, ok, fail, prefix, start_time="00:00:00", end_time="23:59:59", df=None, sensor_mapping=None, failed_mapping=None):
+def _write_metadata(filepath, host, port, db, unit, start, end, ok, fail, prefix, start_time="00:00:00", end_time="23:59:59", df=None, sensor_mapping=None, failed_mapping=None, resolution="1m"):
     try:
         p = filepath.replace(".csv", "_metadata.txt")
         if df is None:
@@ -212,12 +228,13 @@ def _write_metadata(filepath, host, port, db, unit, start, end, ok, fail, prefix
         total_points = len(df)
         sensor_mapping = sensor_mapping or {}
         failed_mapping = failed_mapping or {}
+        res_desc = _resolution_to_description(resolution)
         with open(p, "w") as f:
             f.write(f"{prefix} {unit} Universal Auto-Detection Export\n")
             f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
             f.write(f"Unit: {unit}\n")
             f.write(f"Time Period: {start} {start_time} to {end} {end_time}\n")
-            f.write(f"Resolution: 1 minute\n")
+            f.write(f"Resolution: {res_desc}\n")
             f.write(f"Database: {host}:{port}/{db}\n\n")
             f.write(f"Successful Sensors ({len(ok)}):\n")
             for s in ok:

@@ -65,6 +65,16 @@ with st.form("config"):
     with col2:
         end_date = st.date_input("End date", value=YESTERDAY).strftime("%Y-%m-%d")
 
+    resolution = st.selectbox(
+        "Resolution",
+        options=["1s", "5s", "15s", "1m", "5m", "15m", "1h"],
+        index=3,
+        format_func=lambda x: {"1s": "1 second", "5s": "5 seconds", "15s": "15 seconds", "1m": "1 minute (default)",
+                               "5m": "5 minutes", "15m": "15 minutes", "1h": "1 hour"}[x],
+        help="1s = more detail, larger files; 1m = good for trends.",
+        key="resolution",
+    )
+
     st.subheader("Units")
     units_input = st.text_input(
         "Unit names (comma-separated)",
@@ -93,6 +103,7 @@ if run_clicked:
         "start_date": start_date,
         "end_date": end_date,
         "output_dir": str(output_dir),
+        "resolution": resolution,
     }
 
     files_created = []
