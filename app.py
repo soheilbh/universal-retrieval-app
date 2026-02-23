@@ -75,6 +75,13 @@ with st.form("config"):
         key="resolution",
     )
 
+    use_chunked = st.checkbox(
+        "Use chunked retrieval",
+        value=True,
+        help="Split 1s/5s/15s queries into time chunks to avoid timeouts. Uncheck for one query per sensor (can be slower or timeout on large 1s ranges). 1m and coarser always use a single query.",
+        key="use_chunked",
+    )
+
     st.subheader("Units")
     units_input = st.text_input(
         "Unit names (comma-separated)",
@@ -104,6 +111,7 @@ if run_clicked:
         "end_date": end_date,
         "output_dir": str(output_dir),
         "resolution": resolution,
+        "use_chunked": use_chunked,
     }
 
     files_created = []

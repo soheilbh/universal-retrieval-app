@@ -40,15 +40,13 @@ def _chunk_time_ranges(start_str, end_str, interval):
     end = pd.Timestamp(end_str.replace("Z", ""))
     if start >= end:
         return [(start_str, end_str)]
-    # Chunk size by resolution: balance request count vs response size (avoids timeouts, speeds up 1s)
+    # Chunk only for sub-minute resolution (1s, 5s, 15s). 1m and coarser: single query.
     if interval == "1s":
         days = 7   # ~604k points per chunk
     elif interval in ("5s", "15s"):
         days = 14
-    elif interval == "1m":
-        days = 14
     else:
-        # 5m, 15m, 1h: single query
+        # 1m, 5m, 15m, 1h: single query (no chunking)
         return [(start_str, end_str)]
     delta = timedelta(days=days)
     chunks = []
@@ -80,6 +78,7 @@ def run_retrieval(config, progress_callback=None):
     start_time = config.get("start_time", "00:00:00")
     end_time = config.get("end_time", "23:59:59")
     resolution = config.get("resolution", "1m")
+    use_chunked = config.get("use_chunked", True)
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -102,15 +101,16 @@ def run_retrieval(config, progress_callback=None):
     failed_mapping = {}
     total = len(sensors_and_fields)
 
+    query_fn = _query_chunked if use_chunked else _query
     FALLBACK_FIELDS = ("value_i", "value_b", "value_f", "value")
     for i, (col_name, unit, field) in enumerate(sensors_and_fields, 1):
         t0 = time.perf_counter()
-        data = _query_chunked(host, port, database, unit_name, unit, field, start_str, end_str, resolution)
+        data = query_fn(host, port, database, unit_name, unit, field, start_str, end_str, resolution)
         if data is None:
             for alt in FALLBACK_FIELDS:
                 if alt == field:
                     continue
-                data = _query_chunked(host, port, database, unit_name, unit, alt, start_str, end_str, resolution)
+                data = query_fn(host, port, database, unit_name, unit, alt, start_str, end_str, resolution)
                 if data is not None:
                     field = alt
                     break
@@ -170,20 +170,30 @@ def _query(host, port, database, measurement, sensor_name, field, start_str, end
 def _query_chunked(host, port, database, measurement, sensor_name, field, start_str, end_str, interval="1m"):
     """
     Run query in time chunks and concatenate. Much faster for 1s resolution over long ranges.
+    Retries failed chunks; if still incomplete, falls back to one full-range query so we don't lose data.
     """
     chunks = _chunk_time_ranges(start_str, end_str, interval)
     if len(chunks) <= 1:
         return _query(host, port, database, measurement, sensor_name, field, start_str, end_str, interval)
     series = []
+    max_retries = 2  # 3 attempts total per chunk
     for cs, ce in chunks:
-        part = _query(host, port, database, measurement, sensor_name, field, cs, ce, interval)
-        if part is None:
-            continue
-        series.append(part)
+        part = None
+        for _ in range(max_retries + 1):
+            part = _query(host, port, database, measurement, sensor_name, field, cs, ce, interval)
+            if part is not None:
+                break
+        if part is not None:
+            series.append(part)
     if not series:
         return None
     combined = pd.concat(series).sort_index()
     combined = combined[~combined.index.duplicated(keep="last")]
+    # If we missed chunks (partial data), try full-range once so we don't return 10M when 14M exists
+    if len(series) < len(chunks):
+        full = _query(host, port, database, measurement, sensor_name, field, start_str, end_str, interval)
+        if full is not None and len(full) > len(combined):
+            return full
     return combined
 
 
